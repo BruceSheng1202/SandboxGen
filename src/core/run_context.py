@@ -93,10 +93,11 @@ class SampleIdentity:
     The sample as the controller resolved it, before any agent ran.
 
     SG-DATA-02: authorization must not be derivable from a mutable path
-    string. The pair (device, inode) identifies the bytes the controller
-    actually opened, so a later `sample.path` rewrite cannot redirect a read
-    to another file — the path recorded here is for logging and for building
-    argv, and every access is re-checked against dev/inode before use.
+    string. Device and inode identify the file object observed at binding;
+    `matches()` and `open_sample()` compare those values on later access.
+    They do not revalidate content or detect reuse of a deleted inode.
+    Keep the sample and its containing directory protected from modification
+    throughout the run. The recorded digest describes the initial read.
     """
 
     path: Path
@@ -106,7 +107,7 @@ class SampleIdentity:
     inode: int
 
     def matches(self, candidate: Path) -> bool:
-        """True when `candidate` is the very file this identity was built from."""
+        """Compare device and inode; this does not verify the current content."""
         try:
             st = candidate.stat()
         except OSError:
@@ -283,12 +284,10 @@ class RunContext:
         Resolve, validate and pin the sample. Callable exactly once, by the
         orchestrator, before any agent starts.
 
-        The file is opened once and `fstat`-ed through that same descriptor,
-        so the identity describes the bytes that were actually read rather
-        than whatever the path resolves to on a later lookup. SG-PATH-01's
-        TOCTOU window is not closed by this alone — the caller still has to
-        re-check `matches()` at each use — but it removes the case where the
-        hash and the later read disagree.
+        The initial stat and digest use the same open descriptor. This does
+        not freeze the file: concurrent writes, later content changes, and
+        inode reuse are not prevented. Callers must protect the input from
+        modification; a later `matches()` check only compares device/inode.
         """
         with self._lock:
             if self._sample is not None:
@@ -352,9 +351,9 @@ class RunContext:
 
     def open_sample(self):
         """
-        Open the pinned sample for reading, refusing if the path no longer
-        names the same inode. Callers get a file object, never a path they
-        can be talked into changing.
+        Open the sample and reject a non-regular file or changed device/inode.
+        Callers receive a file object. Content changes within the same inode
+        and reuse of a deleted inode are not detected by this check.
         """
         identity = self.sample
         fd = os.open(identity.path, _SAFE_OPEN_FLAGS)

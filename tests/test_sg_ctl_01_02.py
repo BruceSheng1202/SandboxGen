@@ -166,12 +166,15 @@ def test_sample_hash_is_computed_not_declared(ctx: RunContext):
 
 def test_sample_identity_survives_path_swap(ctx: RunContext, tmp_path: Path):
     """
-    SG-DATA-02: rewriting the path must not redirect a read. The identity is
-    (device, inode), so replacing the file at the same path is detected.
+    SG-DATA-02: reject a path replaced by a file with a different inode.
     """
     pinned = ctx.sample
-    pinned.path.unlink()
-    pinned.path.write_bytes(b"attacker-substituted content")
+    # Allocate the replacement while the original still exists, so this test
+    # does not depend on whether the filesystem reuses an unlinked inode.
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"attacker-substituted content")
+    assert replacement.stat().st_ino != pinned.inode
+    replacement.replace(pinned.path)
     assert not pinned.matches(pinned.path)
     with pytest.raises(LedgerRejected, match="no longer resolves"):
         ctx.open_sample()
