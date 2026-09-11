@@ -1,0 +1,13 @@
+# P0-6 (audit INF-04): plain http:// is only safe for same-host localhost
+# traffic (the default below). For any cross-host / remote deployment,
+# set url to https://... and configure verify_ssl / ca_bundle — otherwise
+# the token below and every fetched report transit in cleartext.
+mode: rest
+url: http://localhost:8001
+token: <YOUR_CAPEV2_REST_API_TOKEN>
+storage: /opt/CAPEv2/storage/analyses
+container: cape
+timeout: 300
+poll_interval: 15
+# verify_ssl: true
+# ca_bundle: /path/to/ca.pem  # trust your private CA while retaining verification

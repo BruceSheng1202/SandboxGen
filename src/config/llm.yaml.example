@@ -1,0 +1,24 @@
+# One model for Scout, Architect, Executor and Analyst.
+# This example matches the sampling/transport parameters of the reference run.
+backend: openai_compatible
+model: glm-5.2
+base_url: https://open.bigmodel.cn/api/paas/v4
+api_key: ""  # reads OPENAI_API_KEY when empty; see docs/configuration.md
+# The production wrapper forwards exported API-key variables by name.
+# A nonempty api_key in the ignored local YAML takes precedence.
+temperature: 0.0
+seed: 42
+request_timeout_s: 120
+request_timeout_max_s: 300
+request_timeout_reference_tokens: 8192
+connect_timeout_s: 10
+write_timeout_s: 30
+max_attempts: 4
+retry_budget_s: 1200
+quota_cycle_wait_s: 0
+# max_attempts includes the first request. SDK retries are disabled.
+# The logical budget admits requests/waits; it is not an interrupting watchdog.
+# Do not invent pricing: omit prices unless you know your contract rates.
+# Other supported backends: anthropic, openai, openai_compatible.
+# Configure model/base_url for your provider. Anthropic fallback: ANTHROPIC_API_KEY.
+# MalwareBazaar uses MALWAREBAZAAR_API_KEY, not this configuration.

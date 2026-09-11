@@ -1,0 +1,28 @@
+<tool_call>{"tool": "query_json", "file": "cape_report_fixture.json", "path": "", "limit": 20}</think></think>[query_json] → {
+  "top_level_keys": [
+    "info",
+    "signatures",
+    "behavior",
+    "network",
+    "CAPE",
+    "dropped",
+    "target.info",
+    "target.info.pe",
+    "debug",
+    "strings",
+    "static",
+    "static.pe",
+    "static.pe.imports",
+    "static.pe.exports",
+    "static.pe.resources",
+    "static.pe.resources[0]",
+    "static.pe.resources[0].type",
+    "static PE sections",
+    "static.pe.sections",
+    "info",
+    "report_sha256",
+  ]
+... truncated
+20 keys shown of 22 total
+
+Standard CAPE report structure. Let me start with signatures, then behavior, network, CAPE extractions, and dropped files.</think><tool_call>{"tool": "query_json", "file": "cape_report_fixture.json", "path": "signatures", "limit": 50}</tool_call>

@@ -1,0 +1,11 @@
+# Python 3.12. SDK versions match the reference offline test environment.
+# Full resolved dependencies are pinned in requirements/locks/ after validation.
+anthropic==1.4.0
+openai==3.8.0
+requests==2.34.2
+PyYAML==6.0.3
+pefile
+androguard
+macholib
+pyzipper
+oletools

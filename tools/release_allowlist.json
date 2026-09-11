@@ -1,0 +1,14 @@
+[
+  {
+    "file": "tests/test_sg_m2_controller.py",
+    "rule": "provider-token",
+    "line_sha256": "04897f105882c0447fe29214feb34f568a3f2483271429e0ef0f9eb094cfc84d",
+    "reason": "Fixed synthetic token used to verify redaction; not a credential."
+  },
+  {
+    "file": "tests/test_sg_m2_controller.py",
+    "rule": "provider-token",
+    "line_sha256": "0a9ec45fc7eacad1d5248bc0006d06dfbbb21e9d961ad44eae281e508f011b3b",
+    "reason": "Fixed synthetic token used to verify redaction; not a credential."
+  }
+]

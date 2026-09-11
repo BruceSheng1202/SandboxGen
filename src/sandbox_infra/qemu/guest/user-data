@@ -1,0 +1,52 @@
+#cloud-config
+# SandboxGEN golden-image build. Applied once, with network, by build_guest.sh.
+# Analysis runs never see network (qemu -netdev user,restrict=on).
+hostname: ws-desktop-07
+manage_etc_hosts: true
+timezone: Europe/Berlin
+package_update: true
+package_upgrade: false
+packages:
+  - strace
+  - tcpdump
+  - python3
+  - curl
+  - file
+  - net-tools
+  - iproute2
+  - psmisc
+  - libc6-i386
+users:
+  - name: analyst
+    gecos: Analyst
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: analyst
+write_files:
+  - path: /usr/local/bin/sandboxgen-agent.py
+    permissions: "0755"
+    encoding: b64
+    content: "@AGENT_B64@"
+  - path: /etc/systemd/system/sandboxgen-agent.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=SandboxGEN in-guest agent
+      After=network.target
+      [Service]
+      ExecStart=/usr/bin/python3 /usr/local/bin/sandboxgen-agent.py
+      Restart=always
+      User=root
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/snapd.service.d/override.conf
+    content: |
+      [Unit]
+      ConditionPathExists=/nonexistent
+runcmd:
+  - systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer || true
+  - systemctl disable --now snapd.service snapd.socket snapd.seeded.service || true
+  - systemctl daemon-reload
+  - systemctl enable --now sandboxgen-agent.service
+  - mkdir -p /var/lib/sandboxgen && touch /var/lib/sandboxgen/ready

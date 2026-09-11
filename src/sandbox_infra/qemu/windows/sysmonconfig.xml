@@ -1,0 +1,122 @@
+<!-- Project sandbox collection configuration, schema 4.81.
+     Broad collection with explicit path exclusions; not a complete event log.
+     Requires separately obtained Microsoft Sysmon. -->
+<Sysmon schemaversion="4.81">
+  <HashAlgorithms>sha256</HashAlgorithms>
+  <DnsLookup>False</DnsLookup>
+  <CheckRevocation>False</CheckRevocation>
+  <EventFiltering>
+    <RuleGroup name="" groupRelation="or"><ProcessCreate onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><ProcessTerminate onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <FileCreate onmatch="exclude">
+        <TargetFilename condition="begin with">C:\task\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Prefetch\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\LogFiles\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\winevt\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\sru\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\config\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\ServiceProfiles\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\SoftwareDistribution\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Logs\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Temp\__PSScriptPolicyTest</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\Microsoft\Windows Defender\</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\Microsoft\Diagnosis\</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\Microsoft\Windows\WER\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\OneDrive\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\Windows\WebCache\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\Windows\Explorer\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Packages\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\ConnectedDevicesPlatform\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\Windows\INetCache\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\CrashDumps\</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or"><FileCreateTime onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <FileDeleteDetected onmatch="exclude">
+        <TargetFilename condition="begin with">C:\task\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Temp\__PSScriptPolicyTest</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Microsoft\Windows\</TargetFilename>
+        <TargetFilename condition="contains">\AppData\Local\Packages\</TargetFilename>
+      </FileDeleteDetected>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or"><NetworkConnect onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><DnsQuery onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <RegistryEvent onmatch="exclude">
+        <TargetObject condition="contains">\CurrentVersion\Explorer\</TargetObject>
+        <TargetObject condition="contains">\Shell\Bags</TargetObject>
+        <TargetObject condition="contains">\Shell\BagMRU</TargetObject>
+        <TargetObject condition="contains">\Shell\MuiCache</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Diagnostics\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\CloudStore\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Search\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Appx\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\AppModel\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Notifications\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\WINEVT\</TargetObject>
+        <TargetObject condition="contains">\CurrentVersion\Uninstall\OneDrive</TargetObject>
+        <TargetObject condition="contains">\Software\Classes\Local Settings\</TargetObject>
+        <TargetObject condition="contains">\Software\Microsoft\Edge\</TargetObject>
+        <TargetObject condition="contains">\Software\Microsoft\OneDrive</TargetObject>
+        <TargetObject condition="contains">\Software\Microsoft\Windows Defender\</TargetObject>
+        <TargetObject condition="contains">\Microsoft\Cryptography\</TargetObject>
+        <TargetObject condition="contains">\Microsoft\Windows NT\CurrentVersion\Tracing</TargetObject>
+        <TargetObject condition="contains">\Microsoft\Windows\CurrentVersion\Group Policy\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\Tcpip\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\bam\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\dam\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Services\SharedAccess\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Control\WMI\Autologger\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Control\Nsi\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Control\NetworkSetup2\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Control\Network\</TargetObject>
+        <TargetObject condition="begin with">HKLM\System\CurrentControlSet\Enum\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WlanSvc\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Sysmon\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows Search\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Store\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\SQMClient\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\SettingSync\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Microsoft\WindowsRuntime\</TargetObject>
+        <TargetObject condition="begin with">HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <ImageLoaded condition="begin with">C:\task\</ImageLoaded>
+        <ImageLoaded condition="begin with">C:\Users\</ImageLoaded>
+        <ImageLoaded condition="begin with">C:\ProgramData\</ImageLoaded>
+        <ImageLoaded condition="begin with">C:\Windows\Temp\</ImageLoaded>
+        <ImageLoaded condition="begin with">C:\Temp\</ImageLoaded>
+        <Signed condition="is">false</Signed>
+      </ImageLoad>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or"><CreateRemoteThread onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">\lsass.exe</TargetImage>
+        <TargetImage condition="end with">\winlogon.exe</TargetImage>
+        <TargetImage condition="end with">\csrss.exe</TargetImage>
+        <TargetImage condition="end with">\services.exe</TargetImage>
+        <TargetImage condition="end with">\explorer.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or"><PipeEvent onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><WmiEvent onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><DriverLoad onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><RawAccessRead onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><FileCreateStreamHash onmatch="exclude"/></RuleGroup>
+    <RuleGroup name="" groupRelation="or"><ProcessTampering onmatch="exclude"/></RuleGroup>
+  </EventFiltering>
+</Sysmon>

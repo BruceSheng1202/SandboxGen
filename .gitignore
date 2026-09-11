@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# Private configuration and credentials: commit example templates only.
+**/config/*.yaml
+!**/config/*.yaml.example
+*.env
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# ---------------------------------------------------------------------------
+# Malware samples and anything derived from executing them. These must never
+# enter git — not the binaries, not the dropped payloads, not the memory dumps.
+# ---------------------------------------------------------------------------
+samples/
+sample_pool/
+quarantine/
+*.exe
+*.dll
+*.elf
+*.apk
+*.bin
+*.zip
+*.rar
+*.7z
+*.gz
+# Local staging copy; canonical runtime media lives in vmstore/.
+/win-media/
+
+# ---------------------------------------------------------------------------
+# Pipeline outputs — these are run artefacts, not inputs.
+# ---------------------------------------------------------------------------
+results/
+results*/
+workspace/
+workspaces/
+run_*/
+cape_report*.json
+analysis_report.json
+environment_spec.json
+workflow.json
+*.pcap
+*.dmp
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+run_*.log
+*.nohup.out
+nohup.out
+
+# ---------------------------------------------------------------------------
+# Experiment tracking (MLflow local backend)
+# ---------------------------------------------------------------------------
+mlruns/
+mlartifacts/
+
+# ---------------------------------------------------------------------------
+# Security scan reports (claude-security writes its own .gitignore too)
+# ---------------------------------------------------------------------------
+CLAUDE-SECURITY-*/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+src/config/secrets.env
+
+# Local identities, VM assets, archived experiments and editor state
+**/config/*.yml
+!**/config/*.yml.example
+model_api_key.md
+**/secrets.env
+.codex/
+.agents/
+.idea/
+.vscode/
+.DS_Store
+*.qcow2
+*.img
+*.iso
+*.vmdk
+*.vhd*
+*.tar
+*.pcapng
+*.jsonl
+*.sqlite*
+*.db
+*.pid
+*.out
+*.err
+*.bak
+*.tmp
+coverage.xml
+junit*.xml
+pytest*.xml
+vm-assets/
+vmstore/
+data/
+experiments/
+private/

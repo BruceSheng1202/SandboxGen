@@ -1,0 +1,8 @@
+# Sandbox runner image: qemu (TCG, no KVM needed) + tools to build the guest.
+# Runs rootless under podman. Nothing here needs root on the host.
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache \
+        qemu-system-x86_64 qemu-img qemu-modules \
+        xorriso python3 curl socat \
+    && qemu-system-x86_64 --version
+WORKDIR /work

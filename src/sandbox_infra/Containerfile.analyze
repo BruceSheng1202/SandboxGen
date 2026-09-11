@@ -1,0 +1,12 @@
+# Static-analysis sidecar: runs analyze_sample operations on untrusted sample
+# bytes in a --network none, no-socket, disposable container. A parser RCE is
+# contained here — no network to exfiltrate through, no podman socket to abuse,
+# dropped caps, read-only rootfs. Reuses the harness image's Python parsers
+# (pefile/androguard/macholib/oletools) and adds the binary-analysis CLIs.
+FROM localhost/sandboxgen-harness:py312
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        binutils file upx-ucl yara xxd \
+    && rm -rf /var/lib/apt/lists/*
+# yara rule dir the yara_scan op looks for (empty is fine; op degrades cleanly)
+RUN mkdir -p /usr/share/yara-rules
+WORKDIR /work

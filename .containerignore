@@ -1,0 +1,14 @@
+# The repository-root build context only needs the runtime lock and recipes.
+# Do not send local configs, credentials, source traces or samples to builders.
+**
+!requirements/
+requirements/**
+!requirements/locks/
+requirements/locks/**
+!requirements/locks/runtime.txt
+!src/
+src/**
+!src/sandbox_infra/
+src/sandbox_infra/**
+!src/sandbox_infra/Containerfile.harness
+!src/sandbox_infra/Containerfile.analyze

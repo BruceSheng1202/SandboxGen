@@ -1,0 +1,2 @@
+# Compatibility entry for installing the infrastructure dependencies.
+-r ../requirements.txt

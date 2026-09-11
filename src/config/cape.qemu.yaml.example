@@ -1,0 +1,16 @@
+# Rootless Podman + QEMU TCG, Linux ELF/scripts and optional Windows PE.
+# Replace both absolute paths; YAML does not expand $HOME, ~ or environment vars.
+# qemu_task_dir must be a fresh PRIVATE LOCAL directory for each run.
+mode: qemu
+qemu_image: localhost/sandboxgen-qemu:alpine3.20
+qemu_vm_dir: /absolute/path/to/vm-assets
+qemu_golden: golden.qcow2
+qemu_task_dir: /absolute/local/path/to/run/tasks
+qemu_win_golden: win-golden.qcow2
+qemu_win_state: win-state.gz
+qemu_win_smp: 8
+timeout: 120
+mem_mb: 1536
+smp: 4
+container_timeout: 1200
+# Optional: podman_bin, storage. Windows disk/state are needed only for PE.
