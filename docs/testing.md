@@ -10,7 +10,9 @@ python src/orchestrator.py --help
 python tools/check_release.py
 ```
 
-The original 447 tests and 6 subtests cover model request retries, tool protocols, report contracts, controller provenance checks, QEMU/Windows parsing, and synthetic pipelines. Release preparation added 5 release-check and shell regression tests, bringing the passing total to 452 tests and 6 subtests. The added tests cover forwarding credentials by environment variable name, mounting sample paths that contain spaces, and requiring explicit paths for legacy CAPE initialization. Wrapper regression tests create only a local Unix socket and a fake Podman executable; they do not start services, guests, or real containers. Sandboxes that restrict local sockets must allow this offline test to run.
+The current suite passed 530 tests and 6 subtests. It covers model request retries, tool protocols, report contracts, controller provenance checks, backend configuration and execution gates, QEMU/Windows parsing, static tool pagination, and synthetic pipelines. The initial public release passed 452 tests and 6 subtests; the backend consistency and static tool updates added 78 cases.
+
+Shell regression tests cover forwarding credentials by environment variable name, mounting sample paths that contain spaces, and requiring explicit paths for legacy CAPE initialization. Wrapper tests create only a local Unix socket and a fake Podman executable; they do not start services, guests, or real containers. Sandboxes that restrict local sockets must allow this offline test to run.
 
 CI uses read-only repository permissions and official checkout/setup-python actions pinned to commit SHAs. It installs the lock file and runs these checks without paid API credentials or real samples.
 
@@ -30,4 +32,4 @@ Run these checks on a dedicated host or an allocated compute node. Use a separat
 
 Synthetic test credentials and public defaults for isolated guest accounts serve explicit purposes and are not treated as real credentials. A scan cannot prove that future privacy leaks are impossible. Before committing, also check that real configuration is untracked and that author identity matches the intended disclosure scope.
 
-Internal release preparation compared the candidate with the R6 source: production Python execution ASTs, excluding docstrings, and model prompts remain identical. Functional changes were limited to shell argument/credential forwarding and explicit legacy deployment paths needed for release. All original reference experiment directories were preserved.
+Initial release preparation compared its candidate with the R6 source: production Python execution ASTs, excluding docstrings, and model prompts were identical at that point. The subsequent [backend consistency](platform-consistency.md) and [static tool robustness](static-tool-robustness.md) updates change source and prompts, so that equivalence no longer applies to current code. Original reference experiment snapshots retain their original versions and results.

@@ -4,6 +4,8 @@ SandboxGEN is a research framework for malware analysis. Four model agents—Sco
 
 The controller validates report provenance and delivery. It does not guarantee that every analytical conclusion is correct.
 
+The September 2026 update corrects [Linux/Windows backend contracts](docs/platform-consistency.md), adds effective-setting and execution-validity checks, and repairs [static tool pagination, binary searches, and role-specific write examples](docs/static-tool-robustness.md).
+
 This repository provides source code, configuration templates, offline tests, and general build scripts. API keys, malware samples, VM and container images, raw experimental reports, and cluster scheduling records are excluded.
 
 ## Capabilities and limitations
@@ -33,7 +35,7 @@ python3.12 -m venv .venv
 .venv/bin/python tools/check_release.py
 ```
 
-The release candidate passed **452 tests and 6 subtests** in a fresh environment installed from the lock file. The default tests use mocks and synthetic inputs; they do not call paid model APIs, download malware, or start VMs. Benign integration checks that require Podman or guests run separately; see [testing](docs/testing.md). See [dependencies](docs/dependencies.md) for the lock generation conditions and validation scope.
+The current source passed **530 tests and 6 subtests** in the environment installed from the lock file. The default tests use mocks and synthetic inputs; they do not call paid model APIs, download malware, or start VMs. Benign integration checks that require Podman or guests run separately; see [testing](docs/testing.md). See [dependencies](docs/dependencies.md) for the lock generation conditions and validation scope.
 
 ## Run a complete analysis
 
@@ -71,9 +73,9 @@ Report delivery requires a correctly associated dynamic task and agreement betwe
 
 ## Reference validation
 
-The production source used as the release baseline is the version evaluated in R6. Across three experiment batches, that version covered 32 samples and completed 31. The remaining sample failed to recover from an Architect tool-format error. Combining the latest results for 50 samples across four versions gives 49 reports, of which 48 pass strict delivery validation. **These figures are not analysis accuracy scores or results from testing all 50 samples on the current version.** See [evaluation scope](docs/evaluation.md).
+The initial public release was based on the version evaluated in R6. Across three experiment batches, that version covered 32 samples and completed 31. The remaining sample failed to recover from an Architect tool-format error. Combining the latest historical results for 50 samples across four versions gives 49 reports, of which 48 pass strict delivery validation. **These figures are not analysis accuracy scores or results from testing all 50 samples on the current version.** See [evaluation scope](docs/evaluation.md).
 
-Release preparation preserves the model prompts and production Python execution logic. Changes to configuration templates, documentation, dependencies, and legacy CAPE paths are documented separately. Paid model experiments and reference VM builds were not repeated. This repository alone cannot reconstruct the full environment and data used in the internal experiments.
+Initial release preparation preserved the model prompts and production Python execution logic. Subsequent backend and tool-contract updates change both source and prompts; the historical results above do not validate those changes. This repository alone cannot reconstruct the full environment and data used in the internal experiments.
 
 ## Repository guide
 

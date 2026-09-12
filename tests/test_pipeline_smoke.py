@@ -396,6 +396,7 @@ def test_backend_capabilities_reach_architect(tmp_path, sample):
     from core.qemu_backend import QemuCapeClient
 
     class CapabilityCAPE(FakeCAPE):
+        win_golden = Path("configured-windows-fixture.qcow2")
         capabilities = QemuCapeClient.capabilities
 
     orch, _ = _build(tmp_path, sample, cape=CapabilityCAPE())

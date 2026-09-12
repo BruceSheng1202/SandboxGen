@@ -2,11 +2,11 @@
 """
 detonate.py — runs INSIDE the analysis container (podman --network none).
 
-Boots the golden Linux image on qemu (TCG, no KVM), restores the agent_ready
-snapshot, and detonates one sample by driving the in-guest agent over qemu's
+Boots a fresh overlay of the golden Linux image on qemu (TCG, no KVM)
+and detonates one sample by driving the in-guest agent over qemu's
 loopback hostfwd. The container has no network at all; -netdev user,restrict=on
-is a second wall between guest and host. -drive snapshot=on discards every
-write, so each task starts from the same golden state (SG-VM-01).
+is a second wall between guest and host. Discarding the per-task overlay
+leaves the golden state unchanged (SG-VM-01).
 
 Input  (env):  TASK_DIR=/task, TIMEOUT, GOLDEN=/vm/golden.qcow2, MEM_MB, SMP
 Input  (files): $TASK_DIR/sample  (the bytes to run), $TASK_DIR/meta.json
@@ -14,7 +14,7 @@ Output (file):  $TASK_DIR/report.json  — CAPE-shaped
 The sample is never given network and never reaches the host filesystem
 beyond $TASK_DIR (bind-mounted); nothing here is a trust boundary, the VM is.
 """
-import json, os, re, socket, subprocess, sys, tarfile, time, urllib.request
+import ast, json, os, re, socket, subprocess, sys, tarfile, time, urllib.request
 from urllib.parse import quote
 
 TASK = os.environ.get("TASK_DIR", "/task")
@@ -44,35 +44,144 @@ def _wait_ready(proc, deadline):
 
 
 def _parse_strace(path):
-    """Turn an strace log into CAPE-ish process/behaviour data."""
-    procs, calls, files_w, files_r, conns, dns, execs = {}, 0, set(), set(), set(), set(), []
-    line_re = re.compile(r"^(\d+)\s+[\d.]+\s+(\w+)\((.*)")
+    """Keep syscall outcomes distinct from attempts; never infer successful exec."""
+    procs, calls, pending, sockets = {}, 0, {}, {}
+    written, read, opened_w, opened_r, write_attempts, execs, exec_attempts = set(), set(), set(), set(), set(), [], []
+    events, exec_events, connections = [], [], []
+    truncated = 0
+    prefix = re.compile(r"^(?:\[pid\s+)?(\d+)\]?\s+([\d.]+)\s+(.*)")
+
+    def strings(text):
+        result = []
+        for item in re.findall(r'"(?:\\.|[^"\\])*"', text):
+            try:
+                result.append(ast.literal_eval(item))
+            except (ValueError, SyntaxError):
+                result.append(item[1:-1])
+        return result
+
     try:
-        for line in open(path, errors="replace"):
-            m = line_re.match(line)
+        handle = open(path, errors="replace")
+    except FileNotFoundError:
+        handle = []
+    try:
+        for line in handle:
+            m = prefix.match(line)
             if not m:
                 continue
-            pid, sc, rest = m.group(1), m.group(2), m.group(3)
+            pid, timestamp, body = m.groups()
+            if "<unfinished ...>" in body:
+                pending[pid] = body.split("<unfinished ...>", 1)[0]
+                continue
+            resumed = re.match(r"<\.\.\. (\w+) resumed>(.*)", body)
+            if resumed:
+                start = pending.pop(pid, "")
+                if not start.startswith(resumed.group(1) + "("):
+                    continue
+                body = start + resumed.group(2)
+            m = re.match(r"(\w+)\((.*)\)\s+=\s+(0x[0-9a-f]+|-?\d+|\?)(?:\s+([A-Z][A-Z0-9_]+))?", body)
+            if not m:
+                continue
+            sc, rest, returned, errno = m.groups()
+            result = None if returned == "?" else int(returned, 16 if returned.startswith("0x") else 10)
+            success = None if result is None else result >= 0
+            quoted = strings(rest)
             procs.setdefault(pid, {"pid": int(pid), "syscalls": 0})
             procs[pid]["syscalls"] += 1
             calls += 1
-            if sc in ("open", "openat") and ("O_WRONLY" in rest or "O_RDWR" in rest or "O_CREAT" in rest):
-                q = re.search(r'"([^"]+)"', rest)
-                if q: files_w.add(q.group(1))
-            elif sc in ("open", "openat"):
-                q = re.search(r'"([^"]+)"', rest)
-                if q: files_r.add(q.group(1))
-            elif sc in ("execve", "execveat"):
-                q = re.search(r'"([^"]+)"', rest)
-                if q: execs.append(q.group(1))
+            event = {"pid": int(pid), "timestamp": timestamp, "syscall": sc,
+                     "result": result, "success": success, "errno": errno}
+            if sc in ("open", "openat", "openat2") and quoted:
+                event["path"] = quoted[0]
+                writable = any(flag in rest for flag in ("O_WRONLY", "O_RDWR", "O_CREAT"))
+                if writable:
+                    write_attempts.add(quoted[0])
+                if success:
+                    sockets.pop((pid, result), None)
+                    (opened_w if writable else opened_r).add(quoted[0])
+            elif sc in ("write", "writev", "pwrite64", "pwritev", "read", "readv", "pread64", "preadv"):
+                fd_path = re.match(r"\d+<(/.*?)>,\s", rest)
+                if fd_path:
+                    path_value = fd_path.group(1)
+                    device = re.search(r"<(char|block) \d+:\d+>$", path_value)
+                    if device:
+                        event["device_type"] = device.group(1)
+                        path_value = path_value[:device.start()]
+                    event["path"] = path_value
+                    is_write = "write" in sc
+                    if is_write:
+                        write_attempts.add(path_value)
+                    if result is not None and result > 0:
+                        (written if is_write else read).add(path_value)
+            elif sc in ("execve", "execveat") and quoted:
+                event.update(image=quoted[0], arguments=quoted)
+                exec_attempts.append(quoted[0])
+                exec_events.append(event)
+                if success:
+                    execs.append(quoted[0])
+                    procs[pid]["image"] = quoted[0]
+            elif sc == "socket" and success:
+                parts = [part.strip() for part in rest.split(",")]
+                protocol = "unknown"
+                if len(parts) == 3 and parts[0] in ("AF_INET", "AF_INET6"):
+                    if "SOCK_STREAM" in parts[1] and parts[2] in ("0", "IPPROTO_IP", "IPPROTO_TCP"):
+                        protocol = "tcp"
+                    elif "SOCK_DGRAM" in parts[1] and parts[2] in ("0", "IPPROTO_IP", "IPPROTO_UDP"):
+                        protocol = "udp"
+                sockets[(pid, result)] = protocol
+            elif sc == "close" and success:
+                fd = re.match(r"(\d+)", rest)
+                if fd:
+                    sockets.pop((pid, int(fd.group(1))), None)
+            elif sc in ("dup", "dup2", "dup3") and success:
+                fd = re.match(r"(\d+)", rest)
+                sockets[(pid, result)] = sockets.get((pid, int(fd.group(1))), "unknown") if fd else "unknown"
+            elif sc == "close_range" and success:
+                sockets = {key: value for key, value in sockets.items() if key[0] != pid}
             elif sc == "connect":
                 ip = re.search(r'inet_addr\("([^"]+)"\)|sin6?_addr[^"]*"([^"]+)"', rest)
                 p = re.search(r'sin6?_port=htons\((\d+)\)', rest)
                 addr = (ip.group(1) or ip.group(2)) if ip else None
-                if addr: conns.add(f"{addr}:{p.group(1) if p else '?'}")
-    except FileNotFoundError:
-        pass
-    return procs, calls, sorted(files_w), sorted(files_r), sorted(conns), execs
+                fd = re.match(r"(\d+)", rest)
+                protocol = "tcp" if "<TCP" in rest else "udp" if "<UDP" in rest else sockets.get((pid, int(fd.group(1))), "unknown") if fd else "unknown"
+                if addr:
+                    event.update(dst=f"{addr}:{p.group(1) if p else '?'}", protocol=protocol,
+                                 established=success if protocol == "tcp" else None,
+                                 attribution="traced_process")
+                    connections.append(event.copy())
+            if sc in ("open", "openat", "openat2", "write", "writev", "pwrite64", "pwritev", "execve", "execveat", "connect"):
+                if len(events) < 2000:
+                    events.append(event)
+                else:
+                    truncated += 1
+    finally:
+        if hasattr(handle, "close"):
+            handle.close()
+    return {"processes": list(procs.values()), "syscalls": calls,
+            "summary": {"file_written": sorted(written), "file_read": sorted(read)[:200],
+                        "file_opened_for_write": sorted(opened_w), "file_opened_for_read": sorted(opened_r)[:200],
+                        "file_write_attempted": sorted(write_attempts), "executed": execs,
+                        "execution_attempted": exec_attempts},
+            "events": events, "events_truncated": truncated,
+            "exec_events": exec_events, "connections": connections}
+
+
+def _execution_health(trace, run, sample_path, interpreter=None):
+    roots = []
+    for event in trace["exec_events"]:
+        args = event.get("arguments", [])
+        target = event.get("image") == sample_path
+        script = interpreter and event.get("image") == interpreter and len(args) > 2 and args[2] == sample_path
+        if event.get("success") is True and (target or script):
+            roots.append(event["pid"])
+    errors = [f"{key}: {run[key]}" for key in ("error", "launch_error", "wait_error", "export_error") if run.get(key)]
+    if not run:
+        errors.append("guest run metadata is missing")
+    if not roots:
+        errors.append("no successful exec of the submitted sample or its selected interpreter observed")
+    return {"evidence_schema_version": 2, "execution_valid": not errors,
+            "execution_errors": errors, "sample_process_root_found": bool(roots),
+            "sample_process_root_pids": sorted(set(roots))}
 
 
 def _parse_pcap(path):
@@ -181,7 +290,8 @@ def main():
               "info": {"machine": "qemu-linux", "package": meta.get("package"), "route": "drop"},
               "signatures": [], "behavior": {"processes": []},
               "network": {"dns": [], "tcp": [], "http": [], "hosts": []},
-              "malscore": 0.0, "sandboxgen": {}}
+              "malscore": 0.0, "sandboxgen": {"evidence_schema_version": 2,
+                  "execution_valid": False, "sample_process_root_found": False}}
     try:
         if not _wait_ready(proc, started + max(180, TIMEOUT)):
             report["sandboxgen"]["error"] = "guest agent did not become ready"
@@ -231,34 +341,47 @@ def main():
         run = json.load(open(f"{td}/run.json"))
     except Exception:
         pass
-    procs, calls, fw, fr, conns, execs = _parse_strace(f"{td}/strace.log")
+    trace = _parse_strace(f"{td}/strace.log")
+    procs, calls = trace["processes"], trace["syscalls"]
+    fw = trace["summary"]["file_written"]
     dns, syns = _parse_pcap(f"{td}/net.pcap")
     syns = [x for x in syns if not x.startswith(_LOCAL_NET)]
-    conns = [c for c in conns if not c.startswith(_LOCAL_NET)]   # strace connect() to the local resolver stub etc.
+    connections = [c for c in trace["connections"] if not c["dst"].startswith(_LOCAL_NET)]
     dns = [q for q in dns if not q["request"].endswith((".in-addr.arpa", ".ip6.arpa"))]
-    hosts = sorted({x.rsplit(":", 1)[0] for x in syns} | {c.split(":")[0] for c in conns if ":" in c})
-    report["behavior"]["processes"] = list(procs.values())
-    report["behavior"]["summary"] = {"file_written": fw, "file_read": fr[:200],
-                                     "executed": execs}
+    hosts = sorted({x.rsplit(":", 1)[0] for x in syns} | {c["dst"].rsplit(":", 1)[0] for c in connections})
+    report["behavior"]["processes"] = procs
+    report["behavior"]["summary"] = trace["summary"]
+    report["behavior"]["syscall_events"] = trace["events"]
     report["network"]["hosts"] = hosts
-    report["network"]["dns"] = dns
-    report["network"]["tcp"] = [{"dst": c} for c in sorted(set(conns) | set(syns))]
+    report["network"]["dns"] = [dict(q, attribution="guest_network_capture_unattributed") for q in dns]
+    report["network"]["connections"] = connections
+    tcp = [c for c in connections if c["protocol"] == "tcp"]
+    seen = {c["dst"] for c in tcp}
+    tcp += [{"dst": c, "protocol": "tcp", "established": False,
+             "attribution": "guest_network_capture_unattributed"} for c in sorted(set(syns) - seen)]
+    report["network"]["tcp"] = tcp
+    report["network"]["udp"] = [c for c in connections if c["protocol"] == "udp"]
     # A simple malscore: any child process, any write outside its own dir, or
     # any network attempt (blocked, but attempted) is signal.
     signal = (len(procs) > 1) or bool([f for f in fw if not f.startswith("/tmp/task")]) \
-             or bool(conns) or bool(syns) or bool(dns)
+             or bool(connections) or bool(syns) or bool(dns)
     report["malscore"] = 1.0 if signal else 0.0
     if run.get("timed_out"):
         report["signatures"].append({"name": "long_running_or_timeout", "severity": 1})
     if [f for f in fw if not f.startswith("/tmp/task")]:
         report["signatures"].append({"name": "writes_outside_workdir", "severity": 2})
-    if conns or syns or dns:
+    if connections or syns or dns:
         report["signatures"].append({"name": "network_activity_attempted", "severity": 2})
     report["sandboxgen"] = {"exit_code": run.get("exit_code"), "timed_out": run.get("timed_out"),
                             "syscalls": calls, "process_count": len(procs),
                             "modified_files": run.get("modified_files", [])[:500],
                             "duration_s": round(time.time() - started, 1),
-                            "size_bytes": size, "route_enforced": "drop"}
+                            "size_bytes": size, "route_enforced": "drop",
+                            "syscall_events_truncated": trace["events_truncated"],
+                            "effective_environment": meta.get("effective_environment", {}),
+                            "unsupported_options": meta.get("unsupported_options", []),
+                            "modified_files_attribution": "guest_wide_candidates_not_sample_attributed"}
+    report["sandboxgen"].update(_execution_health(trace, run, f"/tmp/task/{meta.get('name', 'sample')}", meta.get("interpreter")))
     json.dump(report, open(f"{TASK}/report.json", "w"))
     return 0
 

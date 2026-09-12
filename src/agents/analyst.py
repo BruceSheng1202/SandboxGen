@@ -331,9 +331,20 @@ IMPORTANT PRINCIPLES
   Tool Transfer) unless a network download is actually observed. A DNS query
   is T1071.004 only when evidence supports DNS as a C2 channel; certificate
   validation and vendor/origin-check lookups are not C2.
-- `behavior.summary.file_written` is file-drop/staging evidence even when the
-  optional top-level CAPE `dropped` section is absent. Do not say "no dropped
-  files" if the attributed file-written list is non-empty.
+- Interpret summaries using the report's backend and evidence schema. Linux
+  schema 2 separates file_write_attempted, file_opened_for_write and file_written
+  (positive-byte writes), and execution_attempted from executed (successful exec).
+  Failed open/exec/connect calls do not prove writes, payload execution or a
+  connection. Consult syscall_events result/success/errno and record truncation.
+  Older Linux summaries lack these distinctions and cannot prove success alone.
+  A file write does not establish a functional persistence mechanism or payload.
+  Network connections with protocol=unknown are not necessarily TCP; successful
+  UDP connect is not a TCP handshake. established must be supported by evidence.
+  guest_network_capture_unattributed and guest-wide modified-file candidates
+  must not be attributed to the sample without independent process evidence.
+- sandbox/environment/monitors proposals are not applied configuration. Use
+  cape_submission.actual and sandbox.actual for effective settings and ignored
+  proposals; missing actual configuration must be reported as unknown.
 - Empty behavior or absent fields do not prove evasion or absence of activity. Separate unavailable channels, no recorded events, attempted actions, and observed successful actions.
 - If executor.report_sha256_verified is False, the report on disk does NOT
   belong to this sample (stale/cross-run artefact). Do not present its

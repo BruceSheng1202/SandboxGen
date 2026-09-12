@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.env_spec       import EnvironmentSpec
+from core.backend_contract import is_qemu, publish_backend_facts, submission_problems
 from core.run_context    import RunContext, LedgerError
 from core.workflow_log   import WorkflowLog
 from core.llm_backend    import build_llm, LLMConfig
@@ -438,6 +439,10 @@ class Orchestrator:
         """
         spec, log, ctx = st.spec, st.log, st.ctx
         try:
+            if is_qemu(self.cape):
+                # Scout must see the same configured guest contract as Architect.
+                self.cape.connect()
+                publish_backend_facts(spec, self.cape)
             # ── Stage 0: Scout ────────────────────────────────────────
             log.stage_start("Scout", "Download + classify sample, write Environment Spec")
             scout = ScoutAgent(spec, log, self.llm, st.workspace, ctx=ctx)
@@ -467,12 +472,15 @@ class Orchestrator:
                 cape_client=self.cape, ctx=ctx, failure_context=failure_context,
             )
             architect_result = architect.run() or {}
-            architect_ok = bool(architect_result.get("finished", False))
+            plan_errors = submission_problems(spec, self.cape, ctx.sample.path if ctx.has_sample else None)
+            spec.set("cape_submission.validation_errors", plan_errors, actor="controller")
+            architect_ok = bool(architect_result.get("finished", False)) and not plan_errors
             pkg = spec.get("cape_submission.package", "unknown")
             log.stage_end("Architect",
                           f"{'OK' if architect_ok else 'INCOMPLETE'} — Package={pkg}")
             if not architect_ok:
-                return False, "Architect did not finish"
+                return False, ("Invalid Architect configuration: " + "; ".join(plan_errors)
+                               if plan_errors else "Architect did not finish")
 
             # ── Stage 2: Executor ─────────────────────────────────────
             log.stage_start("Executor", "Submit to CAPEv2 and retrieve results")

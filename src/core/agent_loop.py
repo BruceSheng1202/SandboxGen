@@ -84,6 +84,7 @@ from core.spec_policy import SpecPermissionError, SpecSchemaError, tool_allowed
 from core.run_context import LedgerError
 from core.host_ops import ALLOWED_VMS
 from core.tool_contracts import tool_contract, validate_call
+from core.backend_contract import is_qemu
 
 logger = logging.getLogger("amsa")
 
@@ -216,7 +217,7 @@ def _result_cap(tool: str) -> int:
     """
     if tool == "read_spec":
         return MAX_SPEC_OUTPUT
-    if tool == "read_file":
+    if tool in {"read_file", "analyze_sample"}:
         return MAX_SHELL_OUTPUT + 256  # keep the explicit next-offset marker
     return MAX_QUERY_JSON_OUTPUT if tool == "query_json" else MAX_SHELL_OUTPUT
 
@@ -225,6 +226,9 @@ def _visible_result(tool, result):
     cap = _result_cap(tool)
     if len(result) <= cap:
         return result
+    if tool == "analyze_sample":
+        marker = "\n[TRUNCATED: narrow the query or use supported offset/limit options.]"
+        return result[:cap - len(marker)] + marker
     return result[:cap] + (
         f"\n[TRUNCATED: {len(result)} characters total; only {cap} shown. "
         "Use read_spec(path=...) / query_json for a narrower field, "
@@ -329,7 +333,8 @@ class AgentLoop:
                 + "═══════════════════════════════════════════════════════════════════\n"
                 + pinned_block
             )
-        self.system_prompt = system_prompt + tool_contract(agent_name)
+        self.system_prompt = system_prompt + tool_contract(
+            agent_name, allow_sample_download=bool(getattr(ctx, "allow_sample_download", False)))
 
     def _system_with_facts(self) -> str:
         """
@@ -761,6 +766,9 @@ class AgentLoop:
                                  f"Failed to parse tool call JSON: {raw[:100]}")
             else:
                 errors.append("ERROR: each tool call must be a JSON object, not an array or scalar.")
+        if not raw_objects and re.search(r"<invoke\b", response or ""):
+            errors.append("ERROR: XML <invoke> calls are unsupported. Use "
+                          "<tool_call>JSON_OBJECT</tool_call> with a top-level 'tool' field.")
         if not raw_objects and response and "<tool_call>" in response:
             malformed = True
         if valid_call_count:
@@ -803,7 +811,10 @@ class AgentLoop:
         in_tool_block = False
         in_str = False
         esc = False
+        xml_end = -1
         for i, ch in enumerate(text):
+            if i < xml_end:
+                continue
             if in_str:
                 if esc:
                     esc = False
@@ -811,6 +822,12 @@ class AgentLoop:
                     esc = True
                 elif ch == '"':
                     in_str = False
+                continue
+            if depth == 0 and ch == "<" and re.match(r"<invoke\b", text[i:]):
+                # XML parameters can contain path indices or JSON-looking text.
+                # Neither is an executable flat JSON tool call.
+                end = text.find("</invoke>", i)
+                xml_end = len(text) if end < 0 else end + len("</invoke>")
                 continue
             if ch == "<" and text.startswith("<tool_call>", i):
                 # Resynchronise prose only. Once a tagged JSON container has
@@ -1618,6 +1635,20 @@ class AgentLoop:
             self.log.info(self.agent_name,
                           f"Ledger recorded CAPE task {receipt.task_id} "
                           f"(pass {pass_number}, route={receipt.route})")
+        details_getter = getattr(self.cape_client, "submission_details", None)
+        if callable(details_getter):
+            try:
+                details = details_getter(task_id)
+                self.spec.set("cape_submission.actual", details, actor="controller")
+                actual = dict(details.get("effective", {}))
+                actual["scope"] = "backend execution configuration; observation health is recorded in the report"
+                actual["unapplied_environment_proposals"] = self.spec.get("environment") or {}
+                actual["proposed_sandbox"] = {k: v for k, v in (self.spec.get("sandbox") or {}).items() if k != "actual"}
+                actual["proposed_monitors"] = self.spec.get("monitors") or {}
+                self.spec.set("sandbox.actual", actual, actor="controller")
+                note += " effective=" + json.dumps(details.get("effective", {}), ensure_ascii=False)
+            except (ValueError, TypeError, KeyError, SpecPermissionError, SpecSchemaError) as exc:
+                note += f" WARNING: actual configuration could not be recorded: {exc}"
         return f"OK — submitted {sample_path}. task_id={task_id}{note}"
 
     def _tool_cape_status(self, call: dict) -> str:
@@ -1668,10 +1699,15 @@ class AgentLoop:
 
     def _tool_cape_service_check(self) -> str:
         """
-        Fixed, non-interpolated command — the only Docker-touching path left
-        after P0-1/P0-2 route submit/status/report through REST. No
-        LLM-controlled string content reaches this subprocess call at all.
+        Use the configured backend's readiness check. Legacy CAPE falls back
+        to a fixed command with no model-controlled arguments.
         """
+        health_check = getattr(self.cape_client, "health_check", None)
+        if callable(health_check):
+            try:
+                return json.dumps(health_check(), ensure_ascii=False)
+            except Exception as exc:
+                return f"ERROR: backend readiness check failed: {exc}"
         try:
             # argv straight into the container — no `bash -c`, so the static
             # "no shell grammar anywhere" property holds for this path too.
@@ -1694,6 +1730,11 @@ class AgentLoop:
         """
         if not re.match(r'^[A-Za-z0-9_.-]{1,64}$', vm_name or ""):
             return f"ERROR: invalid vm_name {vm_name!r} — refused"
+        if is_qemu(self.cape_client):
+            names = {m["name"] for m in self.cape_client.list_machines()}
+            if vm_name not in names:
+                return f"ERROR: {vm_name!r} is not an available QEMU guest; available: {sorted(names)}"
+            return "OK — QEMU guests are created per submission; cape_submit boots a fresh disposable guest."
         # SG-CONC-01: same allowlist and lease rule as CapeHostOps. This tool
         # used to be a second, unguarded path to `virsh start` that bypassed
         # both; a model-reachable tool must not be weaker than the harness.
@@ -1719,7 +1760,8 @@ class AgentLoop:
 
     # ------------------------------------------------------------------
 
-    def _run_argv(self, argv: list, timeout: int = 60) -> str:
+    def _run_argv(self, argv: list, timeout: int = 60, *,
+                  offset: int = None, limit: int = MAX_SHELL_OUTPUT) -> str:
         """
         Fixed-argv subprocess helper for analyze_sample operations that need
         a real external binary. shell=False and a list of literal arguments
@@ -1735,6 +1777,8 @@ class AgentLoop:
                 stdout            = subprocess.PIPE,
                 stderr            = subprocess.PIPE,
                 text              = True,
+                encoding          = "utf-8",
+                errors            = "replace",
                 env               = _minimal_env(),
                 start_new_session = True,
             )
@@ -1754,6 +1798,16 @@ class AgentLoop:
             return f"ERROR: {argv[0]} timed out after {timeout}s (process group terminated)"
 
         output = (stdout or "") + (stderr or "")
+        if offset is not None:
+            if proc.returncode != 0:
+                if argv[0] == "grep" and proc.returncode == 1:
+                    return "(no matches)"
+                return f"ERROR: {argv[0]} exited {proc.returncode}: {output[:MAX_SHELL_OUTPUT]}"
+            limit = min(limit, MAX_SHELL_OUTPUT)
+            end = min(offset + limit, len(output))
+            page = output[offset:end]
+            continuation = f"next_offset={end}" if end < len(output) else "EOF"
+            return page + f"\n[PAGE: offset={offset}, chars={len(page)}, total_chars={len(output)}, {continuation}]"
         if not output:
             output = f"(exit code {proc.returncode})"
         if len(output) > MAX_SHELL_OUTPUT:
@@ -1765,6 +1819,9 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     def _tool_analyze_sample(self, call: dict) -> str:
+        error = validate_call({**call, "tool": "analyze_sample"})
+        if error:
+            return error
         operations = {
             "identify":           self._op_identify,
             "file":                self._op_file,
@@ -1880,7 +1937,7 @@ class AgentLoop:
         if proc.returncode != 0:
             return (f"ERROR running {operation} in sidecar (exit {proc.returncode}): "
                     f"{(proc.stderr or '')[:300]}")
-        return proc.stdout[:_result_cap('analyze_sample')] if proc.stdout else \
+        return _visible_result("analyze_sample", proc.stdout) if proc.stdout else \
             f"(no output from {operation})"
 
     def _run_operation_sandboxed(self, handler, path: Path, options: dict) -> str:
@@ -2175,10 +2232,12 @@ class AgentLoop:
         return self._run_argv(["file", "--brief", str(path)], timeout=15)
 
     def _op_strings(self, path: Path, options: dict) -> str:
-        return self._run_argv(["strings", "-n", "6", str(path)], timeout=30)
+        return self._run_argv(["strings", "-a", "-n", str(options.get("min_length", 6)), "--", str(path)],
+                              timeout=30, offset=options.get("offset", 0), limit=options.get("limit", MAX_SHELL_OUTPUT))
 
     def _op_strings_utf16(self, path: Path, options: dict) -> str:
-        return self._run_argv(["strings", "-n", "6", "-e", "l", str(path)], timeout=30)
+        return self._run_argv(["strings", "-a", "-n", str(options.get("min_length", 6)), "-e", "l", "--", str(path)],
+                              timeout=30, offset=options.get("offset", 0), limit=options.get("limit", MAX_SHELL_OUTPUT))
 
     def _op_readelf_headers(self, path: Path, options: dict) -> str:
         return self._run_argv(["readelf", "-h", str(path)], timeout=15)
@@ -2205,6 +2264,8 @@ class AgentLoop:
         matches = []
         for rf in rule_files[:20]:
             out = self._run_argv(["yara", str(rf), str(path)], timeout=5)
+            if out.startswith("ERROR"):
+                return out
             if out.strip() and not out.startswith("(exit code") and not out.startswith("ERROR"):
                 matches.append(out.strip())
         return "\n".join(matches)[:MAX_SHELL_OUTPUT] if matches else "no matches"
@@ -2236,7 +2297,8 @@ class AgentLoop:
         pattern = options.get("pattern")
         if not pattern:
             return "ERROR: grep requires options.pattern"
-        return self._run_argv(["grep", "-E", "-i", pattern, str(path)], timeout=15)
+        return self._run_argv(["grep", "-a", "-o", "-E", "-i", "--", pattern, str(path)],
+                              timeout=15, offset=options.get("offset", 0), limit=options.get("limit", MAX_SHELL_OUTPUT))
 
     def _op_pdf_id(self, path: Path, options: dict) -> str:
         return self._run_argv(["pdfid", str(path)], timeout=20)

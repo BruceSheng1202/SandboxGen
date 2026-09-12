@@ -91,6 +91,7 @@ class _Task:
     status: str = "pending"
     guest_os: str = "linux"
     warnings: list[str] = field(default_factory=list)
+    submission: dict = field(default_factory=dict)
 
 
 class QemuCapeClient:
@@ -162,15 +163,19 @@ class QemuCapeClient:
     def _detect(self, sample_path: str, options: dict) -> tuple[str, str, Optional[str]]:
         """(os, name, interpreter). Refuse what no configured guest can run."""
         p = Path(sample_path)
-        head = b""
-        try:
-            head = open(sample_path, "rb").read(2)
-        except OSError:
-            pass
+        with open(sample_path, "rb") as handle:
+            head = handle.read(64)
         interp = _SCRIPT_INTERPRETERS.get(p.suffix.lower())
-        if head == _ELF_MAGIC[:2] or (interp and head != b"MZ"):
-            return "linux", p.name, interp
-        if head == b"MZ" or p.suffix.lower() in (".exe", ".dll"):
+        if head.startswith(_ELF_MAGIC):
+            if len(head) < 52 or head[4:7] not in (b"\x01\x01\x01", b"\x02\x01\x01"):
+                raise ValueError("invalid or unsupported ELF header: little-endian ELF32/ELF64 required")
+            machine = struct.unpack_from("<H", head, 18)[0]
+            if (head[4], machine) not in ((1, 3), (2, 62)):
+                raise ValueError("unsupported ELF architecture: qemu-linux supports i386/x86_64, not ARM or other ISAs")
+            if (head[4] == 2 and len(head) < 64) or struct.unpack_from("<H", head, 16)[0] not in (2, 3):
+                raise ValueError("invalid ELF executable header")
+            return "linux", p.name, None
+        if head.startswith(b"MZ") or p.suffix.lower() in (".exe", ".dll"):
             if self.win_golden is not None:
                 # Windows ShellExecute treats unknown suffixes as documents.
                 # Keep the original basename, but make EXE transport explicit.
@@ -180,9 +185,58 @@ class QemuCapeClient:
             raise ValueError(
                 f"{p.name} is a Windows PE but no Windows golden is built "
                 f"(qemu_win_golden/{self.cfg.qemu_win_state}); refusing.")
+        if interp:
+            return "linux", p.name, interp
         raise ValueError(
             f"qemu backend cannot detonate {p.name} (magic={head!r}); "
-                f"supported: ELF, script (.sh/.py/.pl), Windows PE.")
+            f"supported: ELF, script (.sh/.py/.pl), Windows PE.")
+
+    def validate_submission(self, sample_path: str, options: dict = None) -> dict:
+        """Validate a request without staging bytes or starting a guest."""
+        options = dict(options or {})
+        guest_os, name, interp = self._detect(sample_path, options)
+        machine = "qemu-" + guest_os
+        for key, expected in (("platform", guest_os), ("machine", machine)):
+            if options.get(key) not in (None, "", expected):
+                raise ValueError(f"WRONG_{key.upper()}: requested {options[key]!r}; sample requires {expected!r}")
+        route = options.get("route", _ROUTE)
+        if route not in (_ROUTE, "none"):
+            raise ValueError(f"qemu backend cannot honour route={route!r}; supported routes: drop, none")
+        timeout = options.get("timeout")
+        timeout = self.cfg.timeout if timeout is None else timeout
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 1800:
+            raise ValueError("analysis timeout must be an integer between 1 and 1800 seconds")
+        if guest_os == "windows":
+            launch = self._windows_launch(sample_path, name, options)
+            package = launch["package"]
+            warnings = launch["unsupported_options"]
+        else:
+            package = "elf" if interp is None else ("python" if name.lower().endswith(".py") else "generic")
+            if options.get("package") not in (None, "", package):
+                raise ValueError(f"WRONG_PACKAGE: Linux sample requires {package!r}, got {options['package']!r}")
+            tokens = {}
+            for token in (options.get("options") or "").split(","):
+                if not token.strip():
+                    continue
+                key, _, value = token.strip().partition("=")
+                if key in tokens:
+                    raise ValueError(f"duplicate submission option: {key}")
+                tokens[key] = value
+            warnings = [f"{k}={v}" for k, v in tokens.items()]
+            warnings += [f"{k}={options[k]}" for k in ("memory", "tags", "priority") if options.get(k)]
+            if options.get("enforce_timeout") is True:
+                warnings.append("enforce_timeout=True (Linux observes the traced process group until exit or timeout)")
+            launch = None
+        actual = {"platform": guest_os, "machine": machine, "package": package,
+                  "route": _ROUTE, "timeout": timeout, "interpreter": interp,
+                  "isolation": "qemu-tcg", "arch": "x86_64",
+                  "ram_mb": 4096 if guest_os == "windows" else self.cfg.mem_mb,
+                  "cpus": self.cfg.qemu_win_smp if guest_os == "windows" else self.cfg.smp,
+                  "enforce_timeout": guest_os == "windows", "memory_dump": False,
+                  "monitors": ["sysmon", "tcpdump"] if guest_os == "windows" else ["strace", "tcpdump"],
+                  "environment_provisioning": False}
+        return {"guest_os": guest_os, "name": name, "interpreter": interp,
+                "launch": launch, "effective": actual, "warnings": warnings}
 
     @staticmethod
     def _windows_launch(sample_path: str, name: str, options: dict) -> dict:
@@ -253,19 +307,11 @@ class QemuCapeClient:
         if not self._connected:
             self.connect()
         options = options or {}
-        route = options.get("route", _ROUTE)
-        if route not in (_ROUTE, "none"):
-            raise ValueError(
-                f"qemu backend enforces an isolated guest (route={_ROUTE}); it cannot "
-                f"honour route={route!r}. Refusing rather than running without the "
-                f"isolation the network policy asked for.")
-        guest_os, name, interp = self._detect(sample_path, options)
-        timeout = int(options.get("timeout") or self.cfg.timeout)
-        if not 1 <= timeout <= 1800:
-            raise ValueError("analysis timeout must be between 1 and 1800 seconds")
-        launch = self._windows_launch(sample_path, name, options) if guest_os == "windows" else None
-        if launch and launch["unsupported_options"]:
-            logger.warning("[QemuBackend] options not applied: %s", launch["unsupported_options"])
+        plan = self.validate_submission(sample_path, options)
+        guest_os, name, interp = plan["guest_os"], plan["name"], plan["interpreter"]
+        timeout, launch = plan["effective"]["timeout"], plan["launch"]
+        if plan["warnings"]:
+            logger.warning("[QemuBackend] options not applied: %s", plan["warnings"])
 
         self._next += 1
         task_id = self._next
@@ -281,13 +327,15 @@ class QemuCapeClient:
         sha = hashlib.sha256(open(tdir / "sample", "rb").read()).hexdigest()
         json.dump({"sha256": sha, "name": name, "original_name": Path(sample_path).name,
                    "interpreter": interp, "os": guest_os,
-                   "package": launch["package"] if launch else options.get("package"),
-                   "launch": launch, "timeout": timeout},
+                    "package": plan["effective"]["package"], "effective_environment": plan["effective"],
+                    "unsupported_options": plan["warnings"], "launch": launch, "timeout": timeout},
                   open(tdir / "meta.json", "w"))
 
         task = _Task(task_id=task_id, dir=tdir)
         task.guest_os = guest_os
-        task.warnings = launch["unsupported_options"] if launch else []
+        task.warnings = plan["warnings"]
+        task.submission = {"requested": dict(options), "effective": plan["effective"],
+                           "unsupported_options": plan["warnings"]}
         self._tasks[task_id] = task
         self._detonate(task, timeout=timeout)
         return task_id
@@ -382,12 +430,37 @@ class QemuCapeClient:
     def submission_warnings(self, task_id: int) -> list[str]:
         return list(self._tasks[int(task_id)].warnings)
 
+    def submission_details(self, task_id: int) -> dict:
+        return dict(self._tasks[int(task_id)].submission)
+
+    def health_check(self) -> dict:
+        """Configuration readiness; disposable guests boot per submission."""
+        try:
+            self.connect()
+            if not self.golden.is_file():
+                raise RuntimeError("Linux golden image is missing")
+            return {"backend": "qemu-tcg", "ready": True,
+                    "scope": "configured artifacts; guest startup is checked per task",
+                    "machines": self.list_machines(), "lifecycle": "disposable_per_task"}
+        except Exception as exc:
+            return {"backend": "qemu-tcg", "ready": False, "error": str(exc)}
+
     def capabilities(self) -> dict:
-        return {"backend": "qemu-tcg", "windows_packages": ["exe", "dll"],
-                "windows_options": ["function"], "routes": ["drop", "none"],
+        windows = getattr(self, "win_golden", None) is not None
+        return {"backend": "qemu-tcg", "platforms": ["linux"] + (["windows"] if windows else []),
+                "linux_packages": ["elf", "python", "generic"],
+                "linux_architectures": ["i386", "x86_64"],
+                "linux_scripts": dict(_SCRIPT_INTERPRETERS),
+                "linux_monitors": ["strace", "tcpdump"], "linux_options": [],
+                "windows_packages": ["exe", "dll"] if windows else [],
+                "windows_architectures": ["x86", "x64"] if windows else [],
+                "windows_monitors": ["sysmon", "tcpdump"] if windows else [],
+                "windows_options": ["function"] if windows else [], "routes": ["drop", "none"],
                 "dll_loader": "rundll32; explicit compatible export name/#ordinal required; DllMain unsupported",
                 "memory_dump": False, "cape_monitor_options": False,
-                "vm_provisioning": False,
+                "vm_provisioning": False, "environment_provisioning": False,
+                "resource_configuration": "fixed deployment settings; model proposals are not applied",
+                "guest_lifecycle": "disposable_per_task",
                 "note": "CAPE sleep skipping, extraction and injection options are not implemented. "
                         "Do not claim these features are applied. DLL ImageLoad proves loading, "
                         "not successful invocation of the selected export."}
@@ -409,11 +482,18 @@ class QemuCapeClient:
         procs = len((report.get("behavior") or {}).get("processes") or [])
         sigs = len(report.get("signatures") or [])
         net = report.get("network") or {}
-        net_events = sum(len(net.get(k) or []) for k in ("dns", "tcp", "http", "hosts"))
+        net_events = sum(len(net.get(k) or []) for k in ("dns", "tcp", "udp", "connections", "http", "hosts"))
         malscore = report.get("malscore", 0) or 0
         health = report.get("sandboxgen") or {}
         execution_valid = None
-        if report.get("backend") == "qemu-tcg-windows":
+        if report.get("backend") == "qemu-tcg":
+            # Only a successful target exec observed by the Linux collector
+            # certifies startup. A PID, failed execve or timeout is insufficient.
+            execution_valid = (health.get("evidence_schema_version") == 2
+                               and health.get("sample_process_root_found") is True
+                               and health.get("execution_valid") is True
+                               and not any(health.get(k) for k in ("error", "launch_error", "wait_error", "export_error")))
+        elif report.get("backend") == "qemu-tcg-windows":
             # Recheck old reports too: old collectors called OpenWith a sample
             # root and allowed timeout signatures to hide a failed launch.
             processes = (report.get("behavior") or {}).get("processes") or []

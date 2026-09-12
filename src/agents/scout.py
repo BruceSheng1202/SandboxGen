@@ -71,9 +71,11 @@ TOOL INTERFACE:
 {"tool": "update_spec", "key": "sample.os_target", "value": "windows"}
 </tool_call>
 
-Available tools: analyze_sample, fetch_url, clone_repo, mb_lookup, read_spec,
+Tools (subject to this run's authoritative contract): analyze_sample, read_spec,
                  update_spec, append_spec, read_file, write_file,
                  log_decision, log_observation, finish
+fetch_url, clone_repo and mb_lookup are only enabled for permitted URL/repository
+input acquisition; they are disabled for local-file offline analysis.
 
 analyze_sample(operation, path, options={}) is a fixed allowlist of static-
 analysis operations — see the full list and examples below. Every path must
@@ -284,8 +286,9 @@ PATH E: Script (Python, PowerShell, Bash, JS, VBS, AutoIt, …)
 ──────────────────────────────────────────────
 Tools: python3 (for AST analysis), strings
 
-  Read the script directly:
-  read_file("{path}")
+  Read the script with read_file only if it is inside the workspace.
+  For the original sample outside the workspace, inspect it using:
+  analyze_sample(operation="strings", path="{path}", options={"min_length": 1})
 
   Identify the interpreter from shebang or extension:
     .ps1 / powershell  → PowerShell (Windows target)
@@ -399,39 +402,46 @@ STEP 4 — INFER ENVIRONMENT REQUIREMENTS
 
 Base ALL decisions on sample.os_target and sample.format. Do not assume Linux.
 
+Read cape_submission.backend_capabilities and available_machines before proposing
+an environment. For qemu-tcg these are fixed deployment capabilities: a Linux
+x86_64 guest (i386/x86_64 ELF and the listed script interpreters) and, when listed,
+a Windows x86_64 guest (x86/x64 EXE and compatible DLLs). It does not provision
+Docker sandboxes, KVM/ARM/macOS/Android guests, Wine, or new guest dependencies.
+The sandbox/environment/monitors fields you write are proposals, not evidence
+that configuration was applied. Actual execution is controller-owned under
+cape_submission.actual and sandbox.actual. Record unsupported requirements
+explicitly; do not claim they have been installed or enabled.
+
 ──────────────────────────────────────────────
 4A. SANDBOX ISOLATION AND OS
 ──────────────────────────────────────────────
 
 os_target = linux:
-  - Plain ELF, no kernel exploit → Docker (fast) or QEMU Ubuntu (safer)
-  - Rootkit / kernel exploit → QEMU+KVM Ubuntu (never Docker)
-  - ELF targeting ARM → QEMU with ARM Ubuntu or QEMU ARM emulation
-  update_spec("sandbox.isolation", "docker" or "qemu")
-  update_spec("sandbox.os",        "ubuntu-22.04" or "debian-12")
+  - Choose the available Linux guest only when the ABI/architecture is compatible.
+  - On qemu-tcg use sandbox.isolation="qemu"; ARM and Android native requirements
+    are unsupported by this guest and must be recorded as limitations.
+  - Record the configured guest OS; do not imply a requested OS was installed.
 
 os_target = windows:
-  - PE (.exe / .dll) → QEMU with Windows 10 image + WinRM enabled
-  - Windows script (.ps1 / .vbs) → same Windows VM
-  - Simple PE, no driver/kernel exploit → Wine on Linux (quick analysis)
-    but note Wine cannot capture all Windows behaviour accurately
-  update_spec("sandbox.isolation", "qemu-windows" or "wine")
-  update_spec("sandbox.os",        "windows-10" or "windows-11")
+  - PE (.exe / .dll) → the available compatible Windows guest.
+  - qemu-tcg does not offer Windows script packages, Wine or configurable WinRM.
+  update_spec("sandbox.isolation", "qemu-windows")
+  - Record the configured guest OS, not an assumed Windows version.
 
 os_target = macos:
-  - Mach-O → QEMU with macOS image (if available) or macOS host VM
+  - Requires a backend with an available compatible macOS VM; unsupported on qemu-tcg.
   update_spec("sandbox.isolation", "qemu-macos")
   update_spec("sandbox.os",        "macos-14")
 
 os_target = android:
-  - APK → Android emulator (AVD) via `emulator` CLI
+  - Requires a backend with an available compatible Android VM; unsupported on qemu-tcg.
   update_spec("sandbox.isolation", "avd")
   update_spec("sandbox.os",        "android-33")
 
 os_target = cross-platform (Python, JS, etc.):
   - Choose based on primary targets found in analysis
-  - Python with os.system('reg ...') → Windows VM
-  - Python with pure sockets + Linux paths → Linux container
+  - Match dependencies and OS behavior to available script interpreters.
+  - qemu-tcg script execution uses Linux; Windows-dependent Python is unsupported.
 
 Set architecture:
   update_spec("sandbox.arch", "<x86_64|arm64|i386|arm>")
@@ -442,6 +452,8 @@ Set resources based on classification:
   Cryptominer              → 4096 MB RAM, 20 GB disk (needs CPU headroom)
   Script / dropper         → 1024 MB RAM, 10 GB disk
 
+  These sizes describe desired resources. qemu-tcg uses deployment-configured
+  resources; these proposals do not resize the guest or its disk.
   update_spec("sandbox.ram_mb",  <value>)
   update_spec("sandbox.disk_gb", <value>)
   update_spec("sandbox.reasoning", "<full reasoning for choices made>")
@@ -449,6 +461,9 @@ Set resources based on classification:
 ──────────────────────────────────────────────
 4B. NETWORK MODE
 ──────────────────────────────────────────────
+  For qemu-tcg, the available routes are drop/none only. Propose isolated;
+  record any need for a simulator or downloads as an unmet requirement.
+  The examples below apply only to a deployment that provides those routes.
   No network strings found      → isolated
   Network strings but no C2 IP  → fakenet (intercept all outbound)
   Specific C2 IP/domain found   → fakenet + mock listener at that address
@@ -535,7 +550,11 @@ Set resources based on classification:
 4E. MONITORS
 ──────────────────────────────────────────────
   Select monitors appropriate for the target OS and expected behaviour.
-  Always include network capture regardless of platform.
+  Propose only monitors listed by the active backend. The lists below are
+  analysis requirements, not tools that this framework automatically installs.
+  qemu-tcg configures strace/tcpdump on Linux and Sysmon/tcpdump on Windows;
+  it does not implement configurable Procmon, ETW, perf, blktrace or FakeNet.
+  Raw packet capture is guest-wide and does not by itself attribute traffic.
 
   Linux monitors:
     strace  → syscall trace (always for Linux ELF)
@@ -546,7 +565,7 @@ Set resources based on classification:
 
   Windows monitors:
     sysmon  → process, network, file, registry events (always for Windows PE)
-    procmon → file system and registry trace (always for Windows PE)
+    procmon → file system and registry trace (only if the backend provides it)
     wireshark/tcpdump → network capture (always)
     etw     → Event Tracing for Windows (advanced — if rootkit suspected)
     fakenet → if network.mode == fakenet
@@ -603,6 +622,9 @@ IMPORTANT PRINCIPLES:
 - Never assume Linux — treat every sample as unknown until proven otherwise
 - No package installation is possible — if a tool is missing, say so in the
   spec and continue with what analyze_sample offers
+- Use the next_offset returned by strings/grep for another page. Do not invent
+  options or retry an unavailable tool. If changed queries still yield no new
+  evidence, record the static-analysis limitation and continue to the spec.
 - Record the reasoning for EVERY decision — the Architect reads this
 - Low confidence is honest — do not force a classification without signals
 - If the sample is packed, note it — the Executor will need to handle it

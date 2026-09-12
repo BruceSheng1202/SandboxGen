@@ -67,6 +67,8 @@ CONTROLLER_OWNED: frozenset[str] = frozenset(
         "cape_submission.network_mode_enforced",
         "cape_submission.available_machines",
         "cape_submission.backend_capabilities",
+        "cape_submission.actual",
+        "sandbox.actual",
         "executor.passes_completed",
         "executor.final_task_id",
         "executor.validation_failed",
@@ -90,6 +92,9 @@ CONTROLLER_OWNED: frozenset[str] = frozenset(
 CONTROLLER_OWNED_PREFIXES: tuple[str, ...] = (
     "pass2.artefacts.",
     "provenance.",
+    "sandbox.actual.",
+    "cape_submission.actual.",
+    "cape_submission.validation_errors",
 )
 
 
@@ -141,7 +146,6 @@ ROLE_WRITABLE: dict[str, tuple[str, ...]] = {
         "scout.",
     ),
     "Architect": (
-        "sandbox.actual.",
         "environment.",
         "network.intercept_dns",
         "network.intercept_http",

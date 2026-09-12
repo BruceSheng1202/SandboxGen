@@ -23,13 +23,14 @@ In this CAPEv2 edition, the Architect's job is:
   6. Provide an adjust() method for the Executor to call
      if execution fails and parameters need changing
 
-The Architect does NOT build VMs or install software.
-CAPEv2 and its Windows VM must already be running.
+The Architect does NOT build VMs or install software. The configured backend
+provides its available guests and manages their lifecycle.
 """
 
 import json
 from pathlib import Path
 from core.agent_loop import AgentLoop
+from core.backend_contract import is_qemu
 from core.cape_client import CAPEClient
 
 
@@ -41,16 +42,17 @@ Read the Scout's malware profile from the Environment Spec and determine
 the optimal CAPEv2 submission parameters to ensure the malware executes
 and is analysed correctly.
 
-CAPEv2 is already installed and running. Your job is configuration,
-not installation. Think like a malware analyst who knows CAPEv2 well
-and is deciding how to submit a sample for maximum coverage.
+Your job is to configure a submission to the deployed backend. Its capability
+and machine lists determine what is available and how guests are managed.
 
 YOUR FIRST ACTION IS ALWAYS TO READ THE SPEC.
 
 BACKEND CAPABILITIES OVERRIDE THE CAPEv2 DEFAULTS BELOW:
 If cape_submission.backend_capabilities is present, use that actual tool
-contract. The qemu-tcg backend is NOT CAPEv2: it supports Windows exe and dll
-only, and function= is its only implemented Windows option. Do not request or
+contract. The qemu-tcg backend is NOT CAPEv2: it supports Linux ELF and scripts
+(.sh/.py/.pl) on qemu-linux, and Windows exe/dll when qemu-windows is available.
+The windows_packages field lists Windows packages, not all supported formats.
+function= is its only implemented Windows option. Do not request or
 claim CAPE sleep skipping, injection/extraction, or memory dumps on that backend.
 For DLLs it uses rundll32: explicitly select a compatible exported entry, not
 DllMain. No entry is guessed. A loaded DLL does not prove the chosen export
@@ -121,15 +123,18 @@ Choose based on sample.format and sample.os_target:
   HTA file (.hta):             package = "hta"
   Batch file (.bat/.cmd):      package = "generic"
   Python script (.py):         package = "python"
+  Linux shell/Perl script:     package = "generic" (QEMU .sh/.pl only)
   Linux ELF:                   package = "elf"   (needs Linux VM)
   Android APK:                 package = "apk"   (needs Android VM)
 
-If unsure, default to "generic" for Windows samples — it runs the file
-directly which works for most executables.
+For qemu-tcg, Windows packages are exe/dll only. Other CAPEv2 packages above
+require a backend that explicitly supports them. Do not use generic to bypass
+an unsupported format or guest architecture.
 
 Important DLL notes:
   - If sample is a DLL, check exports: analyze_sample(operation="pe_exports", path="{path}")
-  - Set options to include: "function=DllMain" or the specific export
+  - Select an explicit exported function or ordinal compatible with rundll32.
+    Set options="function=<export or #ordinal>". DllMain is not a valid choice.
 
 ═══════════════════════════════════════════════════════════════════════
 STEP 4 — SELECT SUBMISSION OPTIONS
@@ -182,13 +187,16 @@ Match the sample's requirements to available VMs:
   Linux ELF:          need platform=linux VM (if available)
   Script:             match by OS target
 
-If only one VM is available, use it regardless (log a warning if
-there's an arch mismatch — x86 samples run on x64 Windows fine).
+Select a VM only when its OS and supported architectures match the sample.
+A single available VM must still be compatible. The x86_64 QEMU Linux guest
+supports i386/x86_64 ELF; it does not execute ARM ELF or supply Android's ABI.
 
 If NO matching VM is available:
   - Log the mismatch clearly
   - Set cape_submission.error to explain why
   - Do NOT proceed with wrong VM
+  - If a previous mismatch is resolved, clear cape_submission.error with null.
+    A nonempty error or incomplete/incompatible plan fails stage validation.
 
 ═══════════════════════════════════════════════════════════════════════
 STEP 6 — WRITE SUBMISSION PARAMETERS TO SPEC
@@ -220,9 +228,8 @@ Verify the file exists and is readable:
   analyze_sample(operation="identify", path="{sample.path}")
   analyze_sample(operation="file", path="{sample.path}")
 
-P0-2: submission now goes through cape_submit, which uploads the file
-directly over the REST API (multipart), not via a shared Docker volume —
-so no host/container path translation or copy step is needed here.
+Submission goes through cape_submit, which handles the configured backend's
+staging/upload. Do not translate host/container paths or copy sample files.
 
 ═══════════════════════════════════════════════════════════════════════
 STEP 8 — FINISH
@@ -235,7 +242,7 @@ IMPORTANT PRINCIPLES:
 - Match package to format precisely — wrong package = no analysis data
 - Enable only options implemented by the actual backend; qemu-tcg does not implement combo/extraction/injection/memory dumps.
 - Log the reasoning for every decision — the Executor reads this
-- If the sample path is not accessible in the container, fix it here
+- If the pinned sample is not readable, record the error; do not change its path
 - Never guess the package — use the format→package mapping above
 """
 
@@ -286,7 +293,12 @@ class ArchitectAgent:
         options = self.spec.get("cape_submission.options", "") or ""
         parts = [p for p in options.split(",")
                  if p.strip() and not p.strip().startswith("network=")]
-        parts.append(f"network={cape_network}")
+        if is_qemu(self.cape_client):
+            # QEMU's isolated route is enforced by the submission controller;
+            # it has no CAPE network= option or configurable simulator.
+            cape_network = "none"
+        else:
+            parts.append(f"network={cape_network}")
         new_options = ",".join(parts)
 
         if new_options != options:
@@ -331,8 +343,8 @@ Sample format:  {sample_format}
 OS target:      {os_target}
 Classification: {clf_type}
 
-CAPEv2 is already running with VMs available.
-Your job is to select the right submission parameters, not to build anything.
+Select submission parameters supported by the deployed backend and its
+available machines. Guest creation and lifecycle belong to the backend.
 
 Start with read_spec, then read_spec(path="cape_submission") for actual
 backend capabilities and available VMs. query_json can inspect a specific
@@ -340,8 +352,8 @@ field in environment_spec.json. Never repeatedly read a truncated prefix.
 Write submission parameters that the actual backend supports.
 
 CRITICAL: Verify sample.path exists on disk (analyze_sample "identify"/"file").
-Submission goes through cape_submit's REST upload (P0-2), so no Docker
-container path check or copy step is needed.
+Submission goes through cape_submit, which handles staging/upload for the
+configured backend; no model-driven Docker path check or copy step is needed.
 {self.failure_context}
 Call finish() when all cape_submission.* fields are written.
 """
@@ -353,6 +365,7 @@ Call finish() when all cape_submission.* fields are written.
             log            = self.log,
             agent_name     = "Architect",
             max_iterations = 30,
+            cape_client    = self.cape_client,
             ctx            = self.ctx,
         )
         result = loop.run(initial)
@@ -386,7 +399,7 @@ Common adjustments:
   - Analysis timeout → increase cape_submission.timeout
   - No behaviour → inspect available evidence and backend capabilities; use only supported options. Missing observations alone do not prove evasion.
   - DLL entry point → add function=<export> to options
-  (sample.path is controller-owned and the sample is uploaded by REST —
+  (sample.path is controller-owned and cape_submit handles staging/upload —
    never try to move the file or rewrite its path.)
 
 {self.failure_context}
@@ -400,6 +413,7 @@ Write the corrected parameters and call finish().
             log            = self.log,
             agent_name     = "Architect",
             max_iterations = 20,
+            cape_client    = self.cape_client,
             ctx            = self.ctx,
         )
         result = loop.run(initial)

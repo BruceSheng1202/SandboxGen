@@ -198,3 +198,28 @@ def test_malformed_outer_call_cannot_promote_a_nested_call(prefix):
     loop = AgentLoop(llm, "x", None, log, "Analyst", min_iterations=0)
     assert loop.run("work")["termination_reason"] == "protocol_stalled"
     assert not any(event == "tool_result" for event, data in log.events)
+
+
+def test_xml_path_indices_are_not_misdiagnosed_as_array_tool_calls():
+    xml = ('<invoke name="query_json"><parameter name="path">'
+           'behavior.syscall_events[300]</parameter></invoke>\n'
+           '<invoke name="query_json"><parameter name="path">'
+           'behavior.syscall_events[600]</parameter></invoke>')
+    llm = _LLM([xml, _finish()])
+    log = _Log()
+    loop = AgentLoop(llm, "x", None, log, "Analyst", min_iterations=0)
+    assert loop.run("work")["finished"]
+    diagnostic = next(data["diagnostics"] for event, data in log.events if event == "protocol_recovery")
+    assert diagnostic["status"] == "invalid_tool_schema"
+    assert len(diagnostic["errors"]) == 1
+    assert "XML <invoke>" in diagnostic["errors"][0]
+    assert "array" not in diagnostic["errors"][0]
+
+
+def test_xml_contents_are_never_promoted_to_actions_or_stripped_from_json_strings():
+    loop = AgentLoop(None, "x", None, _Log(), "Analyst")
+    xml = '<invoke name="example"><parameter name="data">' + _finish("nested") + '</parameter></invoke>'
+    assert loop._parse_tool_calls(xml) == []
+    assert loop._parse_tool_calls(xml + _finish("actual")) == [{"tool": "finish", "summary": "actual"}]
+    call = {"tool": "write_file", "path": "notes.txt", "content": xml}
+    assert loop._parse_tool_calls('<tool_call>' + json.dumps(call) + '</tool_call>') == [call]

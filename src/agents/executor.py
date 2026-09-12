@@ -18,6 +18,7 @@ import os
 import time
 from pathlib import Path
 from core.agent_loop import AgentLoop
+from core.backend_contract import is_qemu, submission_problems
 from core.cape_client import CAPEClient
 from core.host_ops import CapeHostOps, HostOpError
 from core.run_context import RunContext, LedgerError
@@ -49,7 +50,10 @@ You are the Executor Agent in AMSA — an Agentic Malware Sandbox Analyser.
 
 YOUR GOAL:
 Submit the malware to CAPEv2, monitor the analysis, and retrieve the results.
-CAPEv2 handles all execution, monitoring, and artefact collection internally.
+The configured backend handles execution, monitoring, and artefact collection.
+Use backend_capabilities and available_machines as the actual contract.
+qemu-tcg boots a fresh disposable Linux/Windows guest per submission; there is
+no persistent CAPE Docker service or libvirt VM to start or restart for it.
 
 YOUR FIRST ACTION IS ALWAYS TO READ THE SPEC.
 
@@ -112,12 +116,14 @@ Also read the CAPEv2 connection info from the environment.
 STEP 2 — VERIFY CAPE IS RUNNING
 ═══════════════════════════════════════════════════════════════════════
 
-Check CAPEv2 services and the analysis VM are up:
+Check the configured backend's readiness (for QEMU this checks configured
+artifacts; guest startup is checked during submission):
 
   {"tool": "cape_service_check"}
 
 If the VM needs starting:
-  {"tool": "cape_vm_start", "vm_name": "cuckoo1"}
+  For a persistent CAPE deployment, use cape_vm_start with the compatible
+  selected VM name. For qemu-tcg, submit directly; guests boot per task.
   There is no wait/sleep tool — just proceed to cape_submit. CAPE's own
   status-poll loop (Step 3 below) already tolerates the VM still booting,
   so nothing is lost by not waiting here explicitly.
@@ -274,6 +280,25 @@ class ExecutorAgent:
         """
         self.log.info("Executor", "Diagnosing failure...")
 
+        if is_qemu(self.cape_client):
+            health = self.cape_client.health_check()
+            if not health.get("ready"):
+                self.log.warning("Executor", f"QEMU backend unavailable: {health}")
+                return F_UNKNOWN
+            task_id = self._current_task_id()
+            if task_id is None:
+                return F_SUBMISSION_ERROR
+            status = self.cape_client.get_task_status(task_id)
+            if str(status).startswith("failed"):
+                return F_SUBMISSION_ERROR
+            try:
+                quality = self.cape_client.report_has_signal(self.cape_client.get_report(task_id))
+            except (ValueError, KeyError, FileNotFoundError):
+                return F_REPORT_MISSING
+            if quality.get("execution_valid") is False:
+                return F_SUBMISSION_ERROR
+            return F_TIMEOUT_NO_DATA if not quality.get("has_signal") else F_UNKNOWN
+
         # 1. Check CAPE services. `systemctl is-active` reports through its
         #    exit code; the old substring match on "inactive"/"failed" also
         #    matched the word appearing in an unrelated error line.
@@ -351,11 +376,17 @@ class ExecutorAgent:
         constrains it to a closed enum and this maps it onto the `ALLOWED_VMS`
         set, so no model-supplied string reaches libvirt either way.
         """
-        os_target = self.spec.get("cape_submission.platform", "windows")
+        os_target = self.spec.get("cape_submission.platform") or self.spec.get("sample.os_target")
+        if os_target not in ("linux", "windows"):
+            raise ValueError("No supported platform selected for VM recovery")
+        if is_qemu(self.cape_client):
+            return "qemu-" + os_target
         return "cuckoo2_linux" if os_target == "linux" else "cuckoo1"
 
     def _agent_ip_for_platform(self) -> str:
-        os_target = self.spec.get("cape_submission.platform", "windows")
+        os_target = self.spec.get("cape_submission.platform") or self.spec.get("sample.os_target")
+        if os_target not in ("linux", "windows"):
+            raise ValueError("No supported platform selected for agent recovery")
         return AGENT_IP_LINUX if os_target == "linux" else AGENT_IP_WIN
 
     def _fix_vm_down(self) -> bool:
@@ -442,6 +473,18 @@ class ExecutorAgent:
                                 "agent UP" if ok else "agent still DOWN")
         return ok
 
+    def _adjust_submission(self, reason: str) -> bool:
+        """Every Architect adjustment must pass the same configuration gate."""
+        result = self.architect.adjust(reason)
+        problems = submission_problems(
+            self.spec, self.cape_client,
+            self.ctx.sample.path if self.ctx.has_sample else self.spec.get("sample.path"),
+        )
+        if not isinstance(result, dict) or result.get("finished") is not True:
+            problems.append("Architect did not finish")
+        self.spec.set("cape_submission.validation_errors", problems, actor="controller")
+        return not problems
+
     def _fix_wrong_package(self) -> bool:
         """Ask the Architect to pick a better package."""
         current = self.spec.get("cape_submission.package", "unknown")
@@ -452,24 +495,28 @@ class ExecutorAgent:
             f"sample.format={format_}, sample.os_target={os_tgt}. "
             f"Re-select the correct CAPE package for this sample type."
         )
-        self.architect.adjust(reason)
+        adjusted = self._adjust_submission(reason)
         new_pkg = self.spec.get("cape_submission.package", current)
-        ok = new_pkg != current
+        problems = self.spec.get("cape_submission.validation_errors")
+        ok = new_pkg != current and adjusted
         self._record_correction(F_WRONG_PACKAGE,
                                 f"Architect.adjust → new package",
-                                f"{current} → {new_pkg}")
+                                f"{current} → {new_pkg}; " + ("validated for retry" if ok else
+                                "not recovered: " + "; ".join(problems or ["package unchanged or Architect incomplete"])))
         return ok
 
     def _fix_timeout_no_data(self) -> bool:
-        """Increase timeout and add human simulation / sleep skipping."""
-        current_timeout = self.spec.get("cape_submission.timeout", 120)
+        """Increase the observation budget; use only implemented options."""
+        current_timeout = self.spec.get("cape_submission.timeout") or 120
         new_timeout     = min(int(current_timeout) + 60, 300)
-        current_options = self.spec.get("cape_submission.options", "")
+        current_options = self.spec.get("cape_submission.options") or ""
+        caps = self.spec.get("cape_submission.backend_capabilities") or {}
+        monitor_options = caps.get("cape_monitor_options", False) if caps else not is_qemu(self.cape_client)
 
         additions = []
-        if "force-sleepskip" not in current_options:
+        if monitor_options and "force-sleepskip" not in current_options:
             additions.append("force-sleepskip=1")
-        if "human=1" not in current_options:
+        if monitor_options and "human=1" not in current_options:
             additions.append("human=1")
 
         new_options = current_options
@@ -491,19 +538,30 @@ class ExecutorAgent:
     def _fix_submission_error(self) -> bool:
         """Ask Architect to diagnose and fix the submission command."""
         reason = (
-            "SUBMISSION_ERROR: CAPEv2 returned a failed_analysis or failed_processing "
-            "status. Check if the sample path is accessible inside the container, "
-            "the package is valid, and the VM has enough resources. "
-            "Fix the submission parameters."
+            "SUBMISSION_ERROR: submission or sample startup failed. Inspect the "
+            "recorded backend status and execution errors; check sample format, "
+            "architecture, package, platform and available machines against the "
+            "backend capabilities. Fix supported submission parameters, or record "
+            "cape_submission.error if the failure cannot be resolved."
         )
-        self.architect.adjust(reason)
+        ok = self._adjust_submission(reason)
+        problems = self.spec.get("cape_submission.validation_errors")
         self._record_correction(F_SUBMISSION_ERROR,
                                 "Architect.adjust for submission error",
-                                "parameters updated")
-        return True
+                                "configuration validated for retry" if ok else
+                                "configuration still invalid: " + "; ".join(problems or ["Architect did not finish"]))
+        return ok
 
     def _fix_report_missing(self) -> bool:
         """Wait longer for CAPE to finish processing."""
+        if is_qemu(self.cape_client):
+            # submit_file is synchronous: there is no background CAPE processor
+            # or legacy storage path that could finish this report later.
+            self._record_correction(
+                F_REPORT_MISSING, "check synchronous QEMU result",
+                "report unavailable; no background processor to recover it",
+            )
+            return False
         self.log.info("Executor", "Fix: waiting for CAPE to finish processing...")
         time.sleep(60)
         task_id = self._current_task_id()
@@ -703,6 +761,10 @@ class ExecutorAgent:
         Drive the CAPE submission. Holds the analysis VM lease for the whole
         stage (SG-CONC-01) and releases it on every exit path.
         """
+        if is_qemu(self.cape_client):
+            # Each task owns a disposable guest/overlay. A lease on the legacy
+            # cuckoo1/cuckoo2_linux VM would describe the wrong resource.
+            return self._run()
         vm = self._vm_for_platform()
         self.ctx.acquire_vm_lease(vm, VM_LEASE_TTL_SECONDS)
         self.log.info("Executor", f"VM lease acquired: {vm}")
@@ -740,11 +802,11 @@ Sample path:    {sample_path}
 Package:        {package}
 OS target:      {os_target}
 Max passes:     {self.max_passes}
-CAPE container: cape
+Backend:        {(self.spec.get('cape_submission.backend_capabilities') or {}).get('backend', 'CAPEv2')}
 
-CAPEv2 is reachable via the typed cape_* tools (REST by default) — start by
-reading the full spec to get all submission parameters, then verify CAPE is
-running (cape_service_check), then submit Pass 1 (cape_submit, 60s timeout),
+The configured backend is reachable via the typed cape_* tools — start by
+reading the full spec to get all submission parameters, then check backend
+readiness (cape_service_check), then submit Pass 1 (cape_submit, 60s timeout),
 assess results, then submit Pass 2 (full timeout), retrieve all artefacts
 and write them to the spec.
 
@@ -761,7 +823,12 @@ interaction (P0-1/P0-2) — there is no general-purpose shell to fall back on.
         if adjustment:
             self.log.info("Executor",
                           f"Pass 1 adjustment requested: {adjustment}")
-            self.architect.adjust(adjustment)
+            if not self._adjust_submission(adjustment):
+                self.spec.set("executor.validation_failed", True, actor="controller")
+                self.spec.set("executor.validation_error",
+                              "Architect adjustment is invalid: " + "; ".join(
+                                  self.spec.get("cape_submission.validation_errors")), actor="controller")
+                return {"passes_completed": len(self.ctx.tasks)}
             initial2 = f"""The previous submission needed adjustment.
 The Architect has updated the cape_submission.* parameters.
 
@@ -790,9 +857,9 @@ Spec path: {self.workspace / 'environment_spec.json'}
             # Re-run the agent after applying the fix
             retry_msg = f"""A failure was detected and a correction was applied.
 
-The system state has been fixed. Re-attempt the full analysis:
+Apply the recorded correction and re-attempt the analysis:
   - Re-read the spec for updated submission parameters
-  - Verify CAPE services and VM are running
+  - Check readiness using the configured backend's tools
   - Re-submit the sample (Pass 1 then Pass 2)
   - Retrieve report and artefacts
   - Write results to spec
@@ -852,14 +919,14 @@ Correction applied: {json.dumps(self.spec.get('executor.corrections', [])[-1], i
             self.log.warning(
                 "Executor",
                 "CAPE report has no behavioral signal or failed sha256 "
-                "verification — retrying once with increased timeout and "
-                "human-simulation before accepting as final."
+                "verification — retrying once with a larger timeout and "
+                "only backend-supported options."
             )
             self._fix_timeout_no_data()
             retry_msg = f"""The previous CAPE run produced a report with no behavioral
 signal (0 processes, 0 signatures, malscore 0), or the report's sha256 did not
-match the submitted sample. Parameters have been adjusted (longer timeout,
-human=1, force-sleepskip=1). Re-submit Pass 2 with the updated
+match the submitted sample. Inspect executor.corrections for the actual
+parameter changes. Re-submit Pass 2 with the updated
 cape_submission.* parameters from the spec and retrieve the new report.
 The new task_id is recorded by the harness automatically; do not try to
 write task IDs or report paths to the spec.
@@ -874,6 +941,11 @@ Spec path: {self.workspace / 'environment_spec.json'}
                 retry_task_id = self._current_task_id()
                 quality = self._persist_report_authoritatively(retry_task_id)
                 task_id = retry_task_id
+
+        if quality.get("execution_valid") is False:
+            self.spec.set("executor.validation_failed", True, actor="controller")
+            self.spec.set("executor.validation_error", "Retry did not verify sample execution", actor="controller")
+            return {"passes_completed": len(self.ctx.tasks)}
 
         if not quality.get("verified", False):
             # INT-04: a hash mismatch is a hard failure, never silently

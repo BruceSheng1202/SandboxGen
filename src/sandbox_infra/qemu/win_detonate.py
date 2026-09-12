@@ -531,7 +531,7 @@ def main():
     for q in pcap_dns:
         n = q["request"].lower()
         if n not in [x["request"] for x in dns_own] and not any(n.endswith(x) or n == x.strip(".") for x in _DNS_NOISE):
-            dns_own.append(q)
+            dns_own.append(dict(q, attribution="guest_network_capture_unattributed"))
     tree_procs, behavior_summary, background_noise = _shape_attributed_behavior(
         procs, tree, files_own, regs_own, files_w, regs,
     )
@@ -584,6 +584,8 @@ def main():
         "background_noise_not_sample_behavior": background_noise,
         "duration_s": round(time.time() - started, 1),
         "size_bytes": size, "route_enforced": "drop",
+        "effective_environment": meta.get("effective_environment", {}),
+        "unsupported_options": meta.get("unsupported_options", []),
         "launch_executable": run.get("launch_executable"),
         "launch_arguments": run.get("launch_arguments"),
         "launcher_version": run.get("launcher_version"),

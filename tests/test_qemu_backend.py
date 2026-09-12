@@ -78,9 +78,17 @@ _GOOD_REPORT = {
 }
 
 
+def _elf_header(*, machine=62, elf_class=2):
+    """Inert ELF executable header; no program headers or payload."""
+    data = bytearray(64 if elf_class == 2 else 52)
+    data[:7] = b"\x7fELF" + bytes([elf_class, 1, 1])
+    struct.pack_into("<HHI", data, 16, 2, machine, 1)
+    return bytes(data)
+
+
 def _elf(vm_dir) -> str:
     p = vm_dir / "sample.elf"
-    p.write_bytes(b"\x7fELF\x02\x01\x01\x00rest")
+    p.write_bytes(_elf_header())
     return str(p)
 
 
@@ -89,7 +97,7 @@ def test_elf_detonates_and_reports(vm_dir):
     tid = c.submit_file(_elf(vm_dir), {"route": "drop"})
     assert c.get_task_status(tid) == "reported"
     _, verified, sha = c.get_report_verified(tid, expected_sha256=__import__("hashlib")
-                                             .sha256(b"\x7fELF\x02\x01\x01\x00rest").hexdigest())
+                                             .sha256(_elf_header()).hexdigest())
     assert verified
     sig = c.report_has_signal(c.get_report(tid))
     assert sig["has_signal"] and sig["process_count"] == 2
@@ -158,7 +166,7 @@ def test_extensionless_pe_gets_exe_name(vm_dir):
 
 def test_network_route_is_refused(vm_dir):
     c = _client(vm_dir, _GOOD_REPORT)
-    with pytest.raises(ValueError, match="isolated guest"):
+    with pytest.raises(ValueError, match="supported routes"):
         c.submit_file(_elf(vm_dir), {"route": "internet"})
 
 
